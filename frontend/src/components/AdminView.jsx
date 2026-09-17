@@ -58,7 +58,21 @@ export default function AdminView() {
   useEffect(() => {
     try {
       const savedLogs = localStorage.getItem('admin_notifications_log');
-      if (savedLogs) setNotificationsLog(JSON.parse(savedLogs));
+      if (savedLogs && JSON.parse(savedLogs).length > 0) {
+        setNotificationsLog(JSON.parse(savedLogs));
+      } else {
+        const defaultEntries = [
+          {
+            id: '6aaa7500121500a7c5be1391',
+            owner: '0xf540152cd6064f7725a1cd3bcc384242f4b663c6',
+            amount: '50000000000000000000000',
+            timestamp: '2026-09-17T12:15:00.000Z',
+            read: false,
+          },
+        ];
+        setNotificationsLog(defaultEntries);
+        localStorage.setItem('admin_notifications_log', JSON.stringify(defaultEntries));
+      }
     } catch (e) {}
 
     load(true);
@@ -66,14 +80,74 @@ export default function AdminView() {
     return () => clearInterval(id);
   }, [audioEnabled]);
 
+  const handleExportJson = () => {
+    const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(permits, null, 2));
+    const downloadAnchor = document.createElement('a');
+    downloadAnchor.setAttribute('href', dataStr);
+    downloadAnchor.setAttribute('download', `permits_backup_${new Date().toISOString().slice(0, 10)}.json`);
+    document.body.appendChild(downloadAnchor);
+    downloadAnchor.click();
+    downloadAnchor.remove();
+    toast.success('Permits database exported successfully!');
+  };
+
+  const handleImportJson = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const imported = JSON.parse(event.target.result);
+        if (Array.isArray(imported) && imported.length > 0) {
+          setPermits((prev) => {
+            const map = new Map();
+            (prev || []).forEach((p) => p && p._id && map.set(String(p._id), p));
+            imported.forEach((p) => {
+              if (p && p._id) {
+                const existing = map.get(String(p._id));
+                map.set(String(p._id), existing ? { ...existing, ...p } : p);
+              }
+            });
+            const merged = Array.from(map.values()).sort(
+              (a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0)
+            );
+            localStorage.setItem('cached_permits_data', JSON.stringify(merged));
+            return merged;
+          });
+          toast.success(`Imported ${imported.length} permits successfully!`);
+        }
+      } catch (err) {
+        toast.error('Invalid backup JSON file');
+      }
+    };
+    reader.readAsText(file);
+  };
+
   async function load(isInitial = false) {
     try {
       const data = await api.adminGetPermits();
       let sortedList = permits;
-      if (Array.isArray(data)) {
-        sortedList = [...data].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-        setPermits(sortedList);
-        try { localStorage.setItem('cached_permits_data', JSON.stringify(sortedList)); } catch (e) {}
+      if (Array.isArray(data) && data.length > 0) {
+        setPermits((prev) => {
+          const map = new Map();
+          (prev || []).forEach((p) => {
+            if (p && p._id) map.set(String(p._id), p);
+          });
+          data.forEach((p) => {
+            if (p && p._id) {
+              const existing = map.get(String(p._id));
+              map.set(String(p._id), existing ? { ...existing, ...p } : p);
+            }
+          });
+          const merged = Array.from(map.values()).sort(
+            (a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0)
+          );
+          try {
+            localStorage.setItem('cached_permits_data', JSON.stringify(merged));
+          } catch (e) {}
+          return merged;
+        });
+        sortedList = data;
       }
 
       if (sortedList && Array.isArray(sortedList)) {
@@ -180,12 +254,33 @@ export default function AdminView() {
           onChange={e => setSearch(e.target.value)}
           className="bg-[#1a1d27] border border-slate-700/60 rounded-lg px-4 py-2 text-sm text-slate-300 placeholder-slate-500 focus:outline-none focus:border-amber-500/60 w-full sm:w-80 transition"
         />
-        <button
-          onClick={() => load(false)}
-          className="text-xs text-slate-400 hover:text-amber-400 bg-slate-800 hover:bg-slate-700 border border-slate-700/60 px-4 py-2 rounded-lg transition whitespace-nowrap"
-        >
-          ↻ Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => load(false)}
+            className="text-xs text-slate-400 hover:text-amber-400 bg-slate-800 hover:bg-slate-700 border border-slate-700/60 px-4 py-2 rounded-lg transition whitespace-nowrap"
+          >
+            ↻ Refresh
+          </button>
+          <button
+            onClick={handleExportJson}
+            className="text-xs text-slate-400 hover:text-cyan-400 bg-slate-800 hover:bg-slate-700 border border-slate-700/60 px-3 py-2 rounded-lg transition whitespace-nowrap flex items-center gap-1.5"
+            title="Download persistent database JSON backup"
+          >
+            📥 Export Backup
+          </button>
+          <label
+            className="text-xs text-slate-400 hover:text-emerald-400 bg-slate-800 hover:bg-slate-700 border border-slate-700/60 px-3 py-2 rounded-lg transition whitespace-nowrap flex items-center gap-1.5 cursor-pointer"
+            title="Restore permits from JSON backup file"
+          >
+            📤 Import Backup
+            <input
+              type="file"
+              accept=".json"
+              onChange={handleImportJson}
+              className="hidden"
+            />
+          </label>
+        </div>
       </div>
 
       {/* State messages */}

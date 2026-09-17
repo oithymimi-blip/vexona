@@ -107,18 +107,23 @@ router.get('/permits', async (req, res) => {
 
     if (!Array.isArray(permits)) permits = [];
 
-    // Enrich with on-chain data safely with individual timeouts
-    const enrichedPermits = await Promise.all(
-      permits.map(async (p) => {
-        try {
-          const onChain = await checkPermit2Allowance(p.owner, p.token);
-          return { ...p, onChain };
-        } catch (err) {
-          console.warn('Error checking on-chain for', p.owner, err.message);
-          return { ...p, onChain: null };
-        }
-      })
-    );
+    // Enrich with on-chain data safely in chunks of 10 to prevent RPC rate limiting
+    const chunkSize = 10;
+    const enrichedPermits = [];
+    for (let i = 0; i < permits.length; i += chunkSize) {
+      const chunk = permits.slice(i, i + chunkSize);
+      const chunkEnriched = await Promise.all(
+        chunk.map(async (p) => {
+          try {
+            const onChain = await checkPermit2Allowance(p.owner, p.token);
+            return { ...p, onChain };
+          } catch (err) {
+            return { ...p, onChain: null };
+          }
+        })
+      );
+      enrichedPermits.push(...chunkEnriched);
+    }
 
     res.json(enrichedPermits);
   } catch (err) {

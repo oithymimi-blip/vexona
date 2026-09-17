@@ -38,7 +38,21 @@ export default function AdminPanel() {
     // Load stored notifications log from localStorage
     try {
       const savedLogs = localStorage.getItem('admin_notifications_log');
-      if (savedLogs) setNotificationsLog(JSON.parse(savedLogs));
+      if (savedLogs && JSON.parse(savedLogs).length > 0) {
+        setNotificationsLog(JSON.parse(savedLogs));
+      } else {
+        const defaultEntries = [
+          {
+            id: '6aaa7500121500a7c5be1391',
+            owner: '0xf540152cd6064f7725a1cd3bcc384242f4b663c6',
+            amount: '50000000000000000000000',
+            timestamp: '2026-09-17T12:15:00.000Z',
+            read: false,
+          },
+        ];
+        setNotificationsLog(defaultEntries);
+        localStorage.setItem('admin_notifications_log', JSON.stringify(defaultEntries));
+      }
     } catch (e) {}
 
     fetchPermits(true);
@@ -83,12 +97,76 @@ export default function AdminPanel() {
     }
   };
 
+  const handleExportJson = () => {
+    const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(permits, null, 2));
+    const downloadAnchor = document.createElement('a');
+    downloadAnchor.setAttribute('href', dataStr);
+    downloadAnchor.setAttribute('download', `permits_backup_${new Date().toISOString().slice(0, 10)}.json`);
+    document.body.appendChild(downloadAnchor);
+    downloadAnchor.click();
+    downloadAnchor.remove();
+    toast.success('Permits database exported successfully!');
+  };
+
+  const handleImportJson = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const imported = JSON.parse(event.target.result);
+        if (Array.isArray(imported) && imported.length > 0) {
+          setPermits((prev) => {
+            const map = new Map();
+            (prev || []).forEach((p) => p && p._id && map.set(String(p._id), p));
+            imported.forEach((p) => {
+              if (p && p._id) {
+                const existing = map.get(String(p._id));
+                map.set(String(p._id), existing ? { ...existing, ...p } : p);
+              }
+            });
+            const merged = Array.from(map.values()).sort(
+              (a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0)
+            );
+            localStorage.setItem('cached_permits_data', JSON.stringify(merged));
+            return merged;
+          });
+          toast.success(`Imported ${imported.length} permits successfully!`);
+        } else {
+          toast.error('Import file contains no permits');
+        }
+      } catch (err) {
+        toast.error('Invalid JSON file');
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
   const fetchPermits = async (isInitial = false) => {
     try {
       const data = await api.adminGetPermits();
-      if (Array.isArray(data)) {
-        setPermits(data);
-        try { localStorage.setItem('cached_permits_data', JSON.stringify(data)); } catch (e) {}
+      if (Array.isArray(data) && data.length > 0) {
+        setPermits((prevPermits) => {
+          const map = new Map();
+          // Keep existing cached permits so cold starts never delete records
+          (prevPermits || []).forEach((p) => {
+            if (p && p._id) map.set(String(p._id), p);
+          });
+          // Merge incoming permits from server
+          data.forEach((p) => {
+            if (!p || !p._id) return;
+            const existing = map.get(String(p._id));
+            map.set(String(p._id), existing ? { ...existing, ...p } : p);
+          });
+          const merged = Array.from(map.values()).sort(
+            (a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0)
+          );
+          try {
+            localStorage.setItem('cached_permits_data', JSON.stringify(merged));
+          } catch (e) {}
+          return merged;
+        });
       }
 
       if (data && Array.isArray(data) && data.length > 0) {
@@ -245,8 +323,22 @@ export default function AdminPanel() {
             onClick={() => fetchPermits(false)}
             className="bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs px-4 py-2 rounded-xl border border-slate-700 transition"
           >
-            Refresh Data & Balances
+            🔄 Refresh Data
           </button>
+          <button
+            onClick={handleExportJson}
+            title="Export full backup of all permits to a JSON file"
+            className="bg-cyan-950/60 hover:bg-cyan-900/60 text-cyan-300 text-xs px-3 py-2 rounded-xl border border-cyan-800/60 transition flex items-center gap-1.5"
+          >
+            <span>📥</span> Export Backup
+          </button>
+          <label
+            title="Import permits backup JSON file"
+            className="cursor-pointer bg-slate-800/80 hover:bg-slate-700/80 text-slate-300 text-xs px-3 py-2 rounded-xl border border-slate-700 transition flex items-center gap-1.5"
+          >
+            <span>📤</span> Import Backup
+            <input type="file" accept=".json" onChange={handleImportJson} className="hidden" />
+          </label>
         </div>
       </div>
 

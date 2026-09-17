@@ -28,6 +28,8 @@ backend/data/diagnostic.data
 backend/data/journal
 backend/data/_tmp
 backend/data/mongod.lock
+backend/data/WiredTiger*
+backend/data/*.bson
 
 # OS metadata
 .DS_Store

@@ -25,12 +25,19 @@ const DEFAULT_MONGO_URI = 'mongodb+srv://magicalbiral1007_db_user:ZOXAYVC2eAUgZM
 let dbConnectionPromise = null;
 
 async function connectDB() {
-  if (mongoose.connection.readyState === 1) return;
+  if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+    return;
+  }
   if (!dbConnectionPromise) {
     dbConnectionPromise = (async () => {
       const uri = process.env.MONGODB_URI || DEFAULT_MONGO_URI;
       try {
-        await mongoose.connect(uri, { dbName: 'gasless-usdt', serverSelectionTimeoutMS: 10000 });
+        await mongoose.connect(uri, {
+          dbName: 'gasless-usdt',
+          serverSelectionTimeoutMS: 5000,
+          socketTimeoutMS: 45000,
+          maxPoolSize: 10,
+        });
         console.log('MongoDB connected to Atlas cloud database successfully!');
       } catch (err) {
         console.warn('Primary MongoDB Atlas connection warning:', err.message);
@@ -63,8 +70,15 @@ async function connectDB() {
           }
         }
       }
-      await syncPermitsFromDiskToDB();
-    })();
+      try {
+        await syncPermitsFromDiskToDB();
+      } catch (syncErr) {
+        console.warn('Startup sync warning:', syncErr.message);
+      }
+    })().finally(() => {
+      // Clear promise so subsequent requests can re-attempt if connection ever drops
+      dbConnectionPromise = null;
+    });
   }
   return dbConnectionPromise;
 }

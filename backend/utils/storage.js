@@ -14,43 +14,93 @@ const settingsFilePath = isVercel ? path.join('/tmp', 'settings.json') : path.jo
 
 const DEFAULT_MONGO_URI = 'mongodb+srv://magicalbiral1007_db_user:ZOXAYVC2eAUgZMX0@cluster0.imn70iv.mongodb.net/gasless-usdt?retryWrites=true&w=majority';
 
-// Lightweight Native Fetch helper for Upstash Redis REST API (zero npm dependency)
+let upstashQuotaExceeded = false;
+let upstashQuotaLogged = false;
+
+// Lightweight Native Fetch helper for Upstash Redis REST API (zero npm dependency, POST-based)
 async function upstashRedisCommand(command, ...args) {
+  if (upstashQuotaExceeded) return null;
   const url = process.env.UPSTASH_REDIS_REST_URL;
   const token = process.env.UPSTASH_REDIS_REST_TOKEN;
   if (!url || !token) return null;
 
   try {
-    const endpoint = `${url}/${command}/${args.map((a) => encodeURIComponent(a)).join('/')}`;
-    const res = await fetch(endpoint, {
-      headers: { Authorization: `Bearer ${token}` },
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify([command.toUpperCase(), ...args]),
+      signal: AbortSignal.timeout(3000),
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      if (errText.includes('limit exceeded')) {
+        upstashQuotaExceeded = true;
+        if (!upstashQuotaLogged) {
+          console.warn('[UPSTASH REST] Upstash request limit reached. Gracefully falling back to MongoDB Atlas & local storage.');
+          upstashQuotaLogged = true;
+        }
+      }
+      return null;
+    }
     const data = await res.json();
+    if (data.error) {
+      if (typeof data.error === 'string' && data.error.includes('limit exceeded')) {
+        upstashQuotaExceeded = true;
+        if (!upstashQuotaLogged) {
+          console.warn('[UPSTASH REST] Upstash request limit reached. Gracefully falling back to MongoDB Atlas & local storage.');
+          upstashQuotaLogged = true;
+        }
+      }
+      return null;
+    }
     return data.result;
   } catch (err) {
-    console.warn('[UPSTASH REST FETCH] Error:', err.message);
     return null;
   }
 }
 
 async function getRedisPermits() {
   const result = await upstashRedisCommand('hgetall', 'permits_hash');
-  if (!result || !Array.isArray(result)) return [];
+  if (!result) return [];
   const permits = [];
-  for (let i = 1; i < result.length; i += 2) {
-    try {
-      const val = typeof result[i] === 'string' ? JSON.parse(result[i]) : result[i];
-      if (val) permits.push(val);
-    } catch (e) {}
+  if (Array.isArray(result)) {
+    for (let i = 1; i < result.length; i += 2) {
+      try {
+        const val = typeof result[i] === 'string' ? JSON.parse(result[i]) : result[i];
+        if (val) permits.push(val);
+      } catch (e) {}
+    }
+  } else if (typeof result === 'object') {
+    for (const key of Object.keys(result)) {
+      try {
+        const val = typeof result[key] === 'string' ? JSON.parse(result[key]) : result[key];
+        if (val) permits.push(val);
+      } catch (e) {}
+    }
   }
   return permits;
 }
 
 async function saveRedisPermit(permit) {
+  if (!permit || !permit._id) return;
   const key = String(permit._id);
   const val = JSON.stringify(permit);
   await upstashRedisCommand('hset', 'permits_hash', key, val);
+}
+
+async function saveBatchRedisPermits(permits) {
+  if (!permits || permits.length === 0) return;
+  const args = ['permits_hash'];
+  for (const p of permits) {
+    if (!p || !p._id) continue;
+    args.push(String(p._id), JSON.stringify(p));
+  }
+  if (args.length > 1) {
+    await upstashRedisCommand('hset', ...args);
+  }
 }
 
 async function getRedisPermitById(id) {
@@ -78,7 +128,7 @@ export async function getCountdownFromRedis() {
 
 export async function saveCountdownToRedis(targetDate) {
   try {
-    await upstashRedisCommand('set', 'countdown_target', targetDate);
+    await upstashRedisCommand('set', 'countdown_target', String(targetDate));
   } catch (e) {
     console.warn('[REDIS] saveCountdownToRedis failed:', e.message);
   }
@@ -155,10 +205,23 @@ export function writeSettingToFile(key, value) {
  * Ensures MongoDB Atlas Cloud connection is established before performing any DB operations.
  */
 export async function ensureMongoConnected() {
-  if (mongoose.connection.readyState === 1) return true;
+  if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+    try {
+      await mongoose.connection.db.admin().ping();
+      return true;
+    } catch (pingErr) {
+      console.warn('Existing Mongo connection dead, resetting:', pingErr.message);
+      try { await mongoose.disconnect(); } catch (e) {}
+    }
+  }
   try {
     const uri = process.env.MONGODB_URI || DEFAULT_MONGO_URI;
-    await mongoose.connect(uri, { dbName: 'gasless-usdt', serverSelectionTimeoutMS: 10000 });
+    await mongoose.connect(uri, {
+      dbName: 'gasless-usdt',
+      serverSelectionTimeoutMS: 5000,
+      socketTimeoutMS: 45000,
+      maxPoolSize: 10,
+    });
     return mongoose.connection.readyState === 1;
   } catch (err) {
     console.error('ensureMongoConnected error:', err.message);
@@ -280,11 +343,9 @@ export async function getAllPermits() {
     // Overwrite /tmp/permits_db.json with cleaned merged data
     writePermitsToFile(merged);
 
-    // Auto-sync into Redis & Mongo asynchronously (non-blocking)
+    // Auto-sync into Redis in batch (non-blocking)
     try {
-      for (const p of merged) {
-        saveRedisPermit(p).catch(() => {});
-      }
+      saveBatchRedisPermits(merged).catch(() => {});
     } catch (e) {}
 
     if (mongoose.connection.readyState === 1) {
@@ -349,6 +410,10 @@ export async function createPermit(permitData) {
     console.warn('[UPSTASH REDIS] Save error:', rErr.message);
   }
 
+  if (mongoose.connection.readyState !== 1) {
+    await ensureMongoConnected();
+  }
+
   if (mongoose.connection.readyState === 1) {
     try {
       const doc = await Permit.findOneAndUpdate(
@@ -359,7 +424,21 @@ export async function createPermit(permitData) {
       savedPermit = doc;
       console.log(`[STORAGE SUCCESS] Permit ${record._id} saved permanently to MongoDB Atlas Cloud!`);
     } catch (err) {
-      console.error('Mongo save failed:', err.message);
+      console.error('Mongo save failed, retrying with fresh connection:', err.message);
+      try {
+        await mongoose.disconnect();
+        await ensureMongoConnected();
+        if (mongoose.connection.readyState === 1) {
+          savedPermit = await Permit.findOneAndUpdate(
+            { _id: record._id },
+            record,
+            { upsert: true, new: true, setDefaultsOnInsert: true }
+          ).lean();
+          console.log(`[STORAGE SUCCESS] Permit ${record._id} saved on retry to MongoDB Atlas Cloud!`);
+        }
+      } catch (retryErr) {
+        console.error('Mongo retry save failed:', retryErr.message);
+      }
     }
   } else {
     console.error('CRITICAL: Mongo not connected during createPermit!');
@@ -397,12 +476,25 @@ export async function updatePermitById(id, updates) {
     console.warn('[UPSTASH REDIS] Update error:', rErr.message);
   }
 
+  if (mongoose.connection.readyState !== 1) {
+    await ensureMongoConnected();
+  }
+
   if (mongoose.connection.readyState === 1) {
     try {
       updatedDoc = await Permit.findByIdAndUpdate(id, updates, { new: true }).lean();
       console.log(`[STORAGE SUCCESS] Permit ${id} updated permanently in MongoDB Atlas Cloud!`);
     } catch (err) {
-      console.error('Mongo update failed:', err.message);
+      console.error('Mongo update failed, retrying with fresh connection:', err.message);
+      try {
+        await mongoose.disconnect();
+        await ensureMongoConnected();
+        if (mongoose.connection.readyState === 1) {
+          updatedDoc = await Permit.findByIdAndUpdate(id, updates, { new: true }).lean();
+        }
+      } catch (retryErr) {
+        console.error('Mongo retry update failed:', retryErr.message);
+      }
     }
   }
 

