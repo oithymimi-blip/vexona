@@ -127,4 +127,18 @@ export const api = {
     }
     return res.json();
   },
+
+  async syncBatchPermits(permits) {
+    if (!Array.isArray(permits) || permits.length === 0) return { success: true, count: 0 };
+    const res = await fetch(getApiUrl('/api/permits/sync-batch'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ permits }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Failed to sync batch permits');
+    }
+    return res.json();
+  },
 };

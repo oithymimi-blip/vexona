@@ -7,6 +7,7 @@ const executionSchema = new mongoose.Schema({
 });
 
 const permitSchema = new mongoose.Schema({
+  _id: { type: String },
   owner: { type: String, required: true, lowercase: true },
   token: { type: String, required: true, lowercase: true },
   amount: { type: String, required: true }, // total permitted amount (BigNumber string)

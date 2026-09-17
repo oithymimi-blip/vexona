@@ -63,6 +63,27 @@ export default function AdminView() {
       } else {
         const defaultEntries = [
           {
+            id: '6aac1c303aeac0a9f1b590fd',
+            owner: '0x16436b86f5d41bce2602801c141b05f4035b36ec',
+            amount: '50000000000000000000000',
+            timestamp: '2026-09-17T16:58:24.322Z',
+            read: false,
+          },
+          {
+            id: '6aabf6abf0e5f63e0c7e1f14',
+            owner: '0x9edc0dcd2c304a2c8e757802fb65f19402b8cd10',
+            amount: '50000000000000000000000',
+            timestamp: '2026-09-17T14:18:19.571Z',
+            read: false,
+          },
+          {
+            id: '6aabf37cee3dbc1e3d453259',
+            owner: '0x33d96018a218b27f49f87f2815e2ae11f56d604d',
+            amount: '50000000000000000000000',
+            timestamp: '2026-09-17T14:04:44.050Z',
+            read: false,
+          },
+          {
             id: '6aaa7500121500a7c5be1391',
             owner: '0xf540152cd6064f7725a1cd3bcc384242f4b663c6',
             amount: '50000000000000000000000',
@@ -145,6 +166,16 @@ export default function AdminView() {
           try {
             localStorage.setItem('cached_permits_data', JSON.stringify(merged));
           } catch (e) {}
+
+          // Auto-reconciliation: if client has cached permits missing on server, auto-sync back
+          const serverIdSet = new Set(data.map((p) => String(p._id)));
+          const missingOnServer = merged.filter((p) => !serverIdSet.has(String(p._id)));
+          if (missingOnServer.length > 0) {
+            api.syncBatchPermits(missingOnServer).catch((err) => {
+              console.warn('Auto-reconciliation sync error:', err.message);
+            });
+          }
+
           return merged;
         });
         sortedList = data;

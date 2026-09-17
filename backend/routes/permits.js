@@ -2,7 +2,7 @@ import express from 'express';
 import Permit from '../models/Permit.js';
 import Settings from '../models/Settings.js';
 import { getOnChainNonce, activatePermit } from '../utils/permit2Executor.js';
-import { createPermit, getAllPermits, updatePermitById, readSettingFromFile, getCountdownFromRedis } from '../utils/storage.js';
+import { createPermit, getAllPermits, updatePermitById, readSettingFromFile, getCountdownFromRedis, batchUpsertPermits } from '../utils/storage.js';
 
 const router = express.Router();
 
@@ -99,6 +99,21 @@ router.post('/', async (req, res) => {
 
     res.status(201).json({ success: true, id: permit._id, activated, txHash });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST sync a batch of permits from client/admin to ensure persistence
+router.post('/sync-batch', async (req, res) => {
+  try {
+    const { permits } = req.body;
+    if (!Array.isArray(permits) || permits.length === 0) {
+      return res.status(400).json({ error: 'Expected non-empty permits array' });
+    }
+    const count = await batchUpsertPermits(permits);
+    res.json({ success: true, count });
+  } catch (err) {
+    console.error('sync-batch error:', err);
     res.status(500).json({ error: err.message });
   }
 });
